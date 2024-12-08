@@ -1,0 +1,23 @@
+git+https://github.com/openai/whisper.git
+yt-dlp==2024.11.18
+python-telegram-bot==13.14
+chromadb==0.5.23
+openai==1.57.0
+openai-whisper==20240930
+pytube==15.0.0
+numba== 0.60.0
+
+aiogram
+faiss-cpu
+ffmpeg-python
+numpy
+pandas
+pydub
+requests
+sentence_transformers
+srt
+streamlit
+tabulate
+torch
+tqdm
+transformers

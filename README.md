@@ -1,14 +1,20 @@
 # VideoRagITMO
 
-`python -m venv venv`
+```shell
+python -m venv venv
+```
 
 ```shell
 source venv/bin/activate
 ```
 
-`pip install -r requirements.txt`
+```shell
+pip install -r requirements.txt
+```
 
-`python rag_youtube.py`
+```shell
+python rag_youtube.py
+```
 
 ### For MacOS
 

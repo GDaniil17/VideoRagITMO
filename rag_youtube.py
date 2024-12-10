@@ -5,7 +5,13 @@ from uuid import uuid4
 import yt_dlp
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from aiogram.types import (
+    Message,
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    CallbackQuery,
+)
 from aiogram.exceptions import TelegramAPIError
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 import whisper
@@ -16,15 +22,24 @@ from typing import Dict, Tuple
 import signal
 import warnings
 
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from sentence_transformers import SentenceTransformer
+
+
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "7833475402:AAGnOzurg8-_j6Saeo7wlr7lO0X04FgveXQ")
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN", "7833475402:AAGnOzurg8-_j6Saeo7wlr7lO0X04FgveXQ"
+)
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN environment variable is required")
 
@@ -33,11 +48,25 @@ active_tasks: Dict[str, asyncio.Task] = {}
 MAX_WORKERS = max(1, multiprocessing.cpu_count() - 1)
 
 
+model_name = 'unsloth/gemma-2-9b-it-bnb-4bit'#"unsloth/gemma-2-9b-bnb-4bit"
+TOKENIZER = AutoTokenizer.from_pretrained(model_name)
+MODEL = AutoModelForCausalLM.from_pretrained(model_name).to("cuda")
+
+modelPath = "sentence-transformers/all-MiniLM-l6-v2"
+model_kwargs = {"device": "cuda"}
+encode_kwargs = {"normalize_embeddings": False}
+
+
+EMBEDDINGS = HuggingFaceEmbeddings(
+    model_name=modelPath, model_kwargs=model_kwargs, encode_kwargs=encode_kwargs
+)
+
+
 def transcribe_audio_process(audio_path: str) -> str:
     try:
         logger.info(f"transcribe_audio_process started: {audio_path=}")
         model = whisper.load_model("small")
-        result = model.transcribe(audio_path, language="ru")
+        result = model.transcribe(audio_path, language="en")
         logger.info(f"transcribe_audio_process finished: {audio_path=}")
         return result["text"]
     except Exception as e:
@@ -48,24 +77,31 @@ def transcribe_audio_process(audio_path: str) -> str:
 async def download_audio(youtube_url: str) -> Tuple[str, str]:
     try:
         logger.info(f"download_audio started: {youtube_url=}")
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as temp_file:
-            audio_path = temp_file.name
 
-        ydl_opts = {
-            'format': '251',
-            'outtmpl': audio_path,
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-            'quiet': False,
-            'noplaylist': True,
-        }
+        temp_dir = tempfile.gettempdir()
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(youtube_url, download=True)
-            title = info.get('title', 'Unknown Title')
+        ydl = yt_dlp.YoutubeDL(
+            {
+                "quiet": True,
+                "verbose": False,
+                "format": "bestaudio",
+                "outtmpl": os.path.join(temp_dir, "%(id)s.%(ext)s"),
+                "postprocessors": [
+                    {
+                        "preferredcodec": "mp3",
+                        "preferredquality": "192",
+                        "key": "FFmpegExtractAudio",
+                    }
+                ],
+                "ffmpeg_location": os.path.realpath(
+                    "C:\\Users\\Vladislav\\Downloads\\ffmpeg-7.1-essentials_build\\ffmpeg-7.1-essentials_build\\bin\\"
+                ),
+            }
+        )
+
+        info = ydl.extract_info(youtube_url, download=True)
+        title = info.get("title", "Unknown Title")
+        audio_path = os.path.join(temp_dir, f"{info['id']}.mp3")
 
         logger.info(f"download_audio finished: {youtube_url=}")
         return audio_path, title
@@ -74,7 +110,9 @@ async def download_audio(youtube_url: str) -> Tuple[str, str]:
         raise
 
 
-def create_video_selection_keyboard(transcripts: Dict[str, Tuple[str, str]]) -> InlineKeyboardMarkup:
+def create_video_selection_keyboard(
+    transcripts: Dict[str, Tuple[str, str]]
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for video_id, (title, _) in transcripts.items():
         display_title = title[:30] + "..." if len(title) > 30 else title
@@ -83,8 +121,43 @@ def create_video_selection_keyboard(transcripts: Dict[str, Tuple[str, str]]) -> 
     return builder.as_markup()
 
 
+def get_llm_response(question, context):
+    system_prompt = (
+        "You are a highly specialized assistant. Your primary task is to answer questions "
+        "based strictly on the context provided. Follow these rules:\n\n"
+        "1. USE ONLY the information given in the provided context to answer the question.\n"
+        "2. If the context does not contain the information needed to answer the question, "
+        'explicitly RESPOND WITH: "I cannot answer the question based on the given context."\n'
+        "3. DO NOT make assumptions, infer missing details, or include information not present in the context.\n"
+        "4. Ensure that your answers are clear, concise, and directly address the question based on the context provided.\n\n"
+    )
+
+    prompt = f"{system_prompt}\n\nContext: {context}\n\nQuestion: {question}\nAnswer:"
+    print(prompt)
+    inputs = TOKENIZER(prompt, return_tensors="pt", truncation=True, max_length=2048)
+
+    outputs = MODEL.generate(
+        inputs["input_ids"].to("cuda"), max_length=250, num_return_sequences=1, do_sample=False
+    )
+    answer = TOKENIZER.decode(outputs[0], skip_special_tokens=True)
+    return answer.split("Answer:")[-1].strip()
+
+
 async def answer_question(transcript: str, question: str) -> str:
-    return f"Ответ по тексту на ваш вопрос:\n\nКонтекст из транскрипции:\n{transcript[:500]}..."
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=150)
+    docs = text_splitter.create_documents([transcript])
+
+    
+    vector_store = FAISS.from_documents(docs, EMBEDDINGS)
+
+    results = vector_store.similarity_search(
+        question,
+        k=2,
+    )
+
+    context = "\n".join([res.page_content for res in results])
+
+    return f"Ответ по тексту на ваш вопрос:\n\n {get_llm_response(question, context)}"
 
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
@@ -98,7 +171,10 @@ async def handle_video_selection(callback: CallbackQuery):
         video_id = callback.data.split(":")[1]
         chat_id = callback.message.chat.id
 
-        if chat_id not in user_sessions or video_id not in user_sessions[chat_id]["transcripts"]:
+        if (
+            chat_id not in user_sessions
+            or video_id not in user_sessions[chat_id]["transcripts"]
+        ):
             await callback.answer("Видео не найдено. Попробуйте еще раз.")
             return
 
@@ -107,7 +183,7 @@ async def handle_video_selection(callback: CallbackQuery):
 
         await callback.message.edit_text(
             f"✅ Выбрано видео: {title}\nТеперь вы можете задавать вопросы по этому видео.",
-            reply_markup=None
+            reply_markup=None,
         )
         await callback.answer("Видео выбрано!")
     except Exception as e:
@@ -148,14 +224,17 @@ async def transcribe_handler(message: Message):
 
                 loop = asyncio.get_running_loop()
                 transcript = await loop.run_in_executor(
-                    process_pool,
-                    transcribe_audio_process,
-                    audio_path
+                    process_pool, transcribe_audio_process, audio_path
                 )
 
                 video_id = str(uuid4())
-                user_sessions[chat_id]["transcripts"][video_id] = (video_title, transcript)
-                keyboard = create_video_selection_keyboard(user_sessions[chat_id]["transcripts"])
+                user_sessions[chat_id]["transcripts"][video_id] = (
+                    video_title,
+                    transcript,
+                )
+                keyboard = create_video_selection_keyboard(
+                    user_sessions[chat_id]["transcripts"]
+                )
 
                 await progress_msg.edit_text(
                     f"✅ Видео успешно обработано!\n\n"
@@ -163,7 +242,7 @@ async def transcribe_handler(message: Message):
                     f"📊 Длина текста: {len(transcript)} символов\n"
                     f"🔄 Активных задач: {len(active_tasks)}/{MAX_WORKERS}\n\n"
                     "Выберите видео для работы:",
-                    reply_markup=keyboard
+                    reply_markup=keyboard,
                 )
             except Exception as e:
                 logger.error(f"Error processing video: {e}")
@@ -190,7 +269,9 @@ async def start_handler(message: Message):
         keyboard = None
 
         if user_sessions[chat_id]["transcripts"]:
-            keyboard = create_video_selection_keyboard(user_sessions[chat_id]["transcripts"])
+            keyboard = create_video_selection_keyboard(
+                user_sessions[chat_id]["transcripts"]
+            )
 
         await message.answer(
             "👋 Привет! Я бот для транскрибации YouTube видео.\n\n"
@@ -205,7 +286,7 @@ async def start_handler(message: Message):
             f"ℹ️ Статус системы:\n"
             f"• Доступно процессов: {MAX_WORKERS}\n"
             f"• Активных задач: {len(active_tasks)}/{MAX_WORKERS}",
-            reply_markup=keyboard
+            reply_markup=keyboard,
         )
     except TelegramAPIError as e:
         logger.error(f"Telegram API error in start handler: {e}")
@@ -224,10 +305,12 @@ async def query_handler(message: Message):
             return
 
         if "selected_video" not in user_sessions[chat_id]:
-            keyboard = create_video_selection_keyboard(user_sessions[chat_id]["transcripts"])
+            keyboard = create_video_selection_keyboard(
+                user_sessions[chat_id]["transcripts"]
+            )
             await message.answer(
                 "📺 Пожалуйста, выберите видео для обработки вопроса:",
-                reply_markup=keyboard
+                reply_markup=keyboard,
             )
             return
 
@@ -237,13 +320,15 @@ async def query_handler(message: Message):
         user_query = message.text
         answer = await answer_question(transcript, user_query)
 
-        keyboard = create_video_selection_keyboard(user_sessions[chat_id]["transcripts"])
+        keyboard = create_video_selection_keyboard(
+            user_sessions[chat_id]["transcripts"]
+        )
 
         await message.answer(
             f"📝 Ваш вопрос по видео '{title}':\n{user_query}\n\n"
             f"{answer}\n\n"
             f"Выберите другое видео для вопросов:",
-            reply_markup=keyboard
+            reply_markup=keyboard,
         )
     except TelegramAPIError as e:
         logger.error(f"Telegram API error in query handler: {e}")
@@ -258,13 +343,13 @@ async def set_commands(bot: Bot):
     await bot.set_my_commands(commands)
 
 
-async def shutdown(signal, loop):
-    logger.info(f"Received exit signal {signal.name}...")
+async def shutdown(sig, loop):
+    logger.info(f"Received exit signal {sig.name}...")
     tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    logger.info(f"Cancelling {len(tasks)} tasks...")
     [task.cancel() for task in tasks]
-    logger.info(f"Cancelling {len(tasks)} outstanding tasks")
     await asyncio.gather(*tasks, return_exceptions=True)
-    process_pool.shutdown(wait=True)
+    logger.info("Tasks cancelled, stopping loop...")
     loop.stop()
 
 
@@ -272,14 +357,18 @@ async def main():
     dp = Dispatcher()
     dp.include_router(router)
 
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(
-            sig,
-            lambda s=sig: asyncio.create_task(shutdown(s, loop))
-        )
-
     try:
+        # Для корректного завершения на Windows
+        loop = asyncio.get_running_loop()
+        stop_event = asyncio.Event()
+
+        def stop():
+            logger.info("Stopping bot...")
+            stop_event.set()
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, lambda s, frame: stop())
+
         await set_commands(bot)
         logger.info(f"Starting bot with {MAX_WORKERS} workers...")
         await dp.start_polling(bot)

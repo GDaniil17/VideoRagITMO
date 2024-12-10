@@ -21,3 +21,5 @@ tabulate
 torch
 tqdm
 transformers
+langchain_community
+transformers

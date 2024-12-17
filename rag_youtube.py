@@ -48,14 +48,14 @@ active_tasks: Dict[str, asyncio.Task] = {}
 MAX_WORKERS = max(1, multiprocessing.cpu_count() - 1)
 
 
-model_name = 'unsloth/gemma-2-9b-it-bnb-4bit'#"unsloth/gemma-2-9b-bnb-4bit"
+model_name = "unsloth/gemma-2-9b-it-bnb-4bit"  # "unsloth/gemma-2-9b-bnb-4bit"
 TOKENIZER = AutoTokenizer.from_pretrained(model_name)
 MODEL = AutoModelForCausalLM.from_pretrained(model_name).to("cuda")
+
 
 modelPath = "sentence-transformers/all-MiniLM-l6-v2"
 model_kwargs = {"device": "cuda"}
 encode_kwargs = {"normalize_embeddings": False}
-
 
 EMBEDDINGS = HuggingFaceEmbeddings(
     model_name=modelPath, model_kwargs=model_kwargs, encode_kwargs=encode_kwargs
@@ -116,7 +116,8 @@ def create_video_selection_keyboard(
     builder = InlineKeyboardBuilder()
     for video_id, (title, _) in transcripts.items():
         display_title = title[:30] + "..." if len(title) > 30 else title
-        builder.button(text=display_title, callback_data=f"select_video:{video_id}")
+        builder.button(text=display_title,
+                       callback_data=f"select_video:{video_id}")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -134,25 +135,29 @@ def get_llm_response(question, context):
 
     prompt = f"{system_prompt}\n\nContext: {context}\n\nQuestion: {question}\nAnswer:"
     print(prompt)
-    inputs = TOKENIZER(prompt, return_tensors="pt", truncation=True, max_length=2048)
+    inputs = TOKENIZER(prompt, return_tensors="pt",
+                       truncation=True, max_length=2048)
 
     outputs = MODEL.generate(
-        inputs["input_ids"].to("cuda"), max_length=250, num_return_sequences=1, do_sample=False
+        inputs["input_ids"].to("cuda"),
+        max_length=1000,
+        num_return_sequences=1,
+        do_sample=False,
     )
     answer = TOKENIZER.decode(outputs[0], skip_special_tokens=True)
     return answer.split("Answer:")[-1].strip()
 
 
 async def answer_question(transcript: str, question: str) -> str:
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=150)
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000, chunk_overlap=300)
     docs = text_splitter.create_documents([transcript])
 
-    
     vector_store = FAISS.from_documents(docs, EMBEDDINGS)
 
     results = vector_store.similarity_search(
         question,
-        k=2,
+        k=3,
     )
 
     context = "\n".join([res.page_content for res in results])

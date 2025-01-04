@@ -8,7 +8,6 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     Message,
     BotCommand,
-    InlineKeyboardButton,
     InlineKeyboardMarkup,
     CallbackQuery,
 )
@@ -27,8 +26,6 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from sentence_transformers import SentenceTransformer
-
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -37,9 +34,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TELEGRAM_BOT_TOKEN = os.getenv(
-    "TELEGRAM_BOT_TOKEN", "7833475402:AAGnOzurg8-_j6Saeo7wlr7lO0X04FgveXQ"
-)
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN environment variable is required")
 
@@ -47,11 +42,9 @@ user_sessions: Dict[int, dict] = {}
 active_tasks: Dict[str, asyncio.Task] = {}
 MAX_WORKERS = max(1, multiprocessing.cpu_count() - 1)
 
-
 model_name = "unsloth/gemma-2-9b-it-bnb-4bit"  # "unsloth/gemma-2-9b-bnb-4bit"
 TOKENIZER = AutoTokenizer.from_pretrained(model_name)
 MODEL = AutoModelForCausalLM.from_pretrained(model_name).to("cuda")
-
 
 modelPath = "sentence-transformers/all-MiniLM-l6-v2"
 model_kwargs = {"device": "cuda"}
@@ -116,8 +109,7 @@ def create_video_selection_keyboard(
     builder = InlineKeyboardBuilder()
     for video_id, (title, _) in transcripts.items():
         display_title = title[:30] + "..." if len(title) > 30 else title
-        builder.button(text=display_title,
-                       callback_data=f"select_video:{video_id}")
+        builder.button(text=display_title, callback_data=f"select_video:{video_id}")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -135,8 +127,7 @@ def get_llm_response(question, context):
 
     prompt = f"{system_prompt}\n\nContext: {context}\n\nQuestion: {question}\nAnswer:"
     print(prompt)
-    inputs = TOKENIZER(prompt, return_tensors="pt",
-                       truncation=True, max_length=2048)
+    inputs = TOKENIZER(prompt, return_tensors="pt", truncation=True, max_length=2048)
 
     outputs = MODEL.generate(
         inputs["input_ids"].to("cuda"),
@@ -149,8 +140,7 @@ def get_llm_response(question, context):
 
 
 async def answer_question(transcript: str, question: str) -> str:
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000, chunk_overlap=300)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=300)
     docs = text_splitter.create_documents([transcript])
 
     vector_store = FAISS.from_documents(docs, EMBEDDINGS)
@@ -364,7 +354,6 @@ async def main():
 
     try:
         # Для корректного завершения на Windows
-        loop = asyncio.get_running_loop()
         stop_event = asyncio.Event()
 
         def stop():
